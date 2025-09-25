@@ -1,0 +1,97 @@
+// 帮助函数 处理错误提示和debug提示
+
+package main
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"net/http"
+	"runtime/debug"
+	"time"
+
+	"github.com/go-playground/form/v4"
+	"github.com/justinas/nosurf"
+)
+
+func (app *application) serverError(w http.ResponseWriter, err error) {
+
+	trace := fmt.Sprintf("%s\n%s", err.Error(), debug.Stack())
+	app.errorLog.Output(2, trace)
+	if app.debug {
+		http.Error(w, trace, http.StatusInternalServerError)
+		return
+	}
+	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+}
+
+func (app *application) clientError(w http.ResponseWriter, status int) {
+	http.Error(w, http.StatusText(status), status)
+
+}
+
+func (app *application) newTemplateData(r *http.Request) *templateData {
+	return &templateData{
+		CurrentYear:     time.Now().Year(),
+		Flash:           app.sessionManager.PopString(r.Context(), "flash"),
+		IsAuthenticated: app.isAuthenticated(r),
+		CSRFToken:       nosurf.Token(r), // 从请求中读取CSRFToken
+	}
+}
+
+func (app *application) notFound(w http.ResponseWriter) {
+	app.clientError(w, http.StatusNotFound)
+}
+
+func (app *application) render(w http.ResponseWriter, status int,
+	page string, data *templateData) {
+	ts, ok := app.templateCache[page]
+
+	// map中是否存在page对应的key
+	if !ok {
+		err := fmt.Errorf("the template %s does not exist", page)
+		app.serverError(w, err)
+		return
+	}
+
+	buf := new(bytes.Buffer)
+
+	err := ts.ExecuteTemplate(buf, "base", data)
+	if err != nil {
+		app.serverError(w, err)
+	}
+
+	w.WriteHeader(status)
+	buf.WriteTo(w)
+
+}
+
+// 解析表单数据，存储到dst
+func (app *application) decodePostForm(r *http.Request, dst any) error {
+	err := r.ParseForm()
+	if err != nil {
+		return err
+	}
+	// 根据tag，自动解析form数据
+	err = app.formDecoder.Decode(dst, r.PostForm)
+	if err != nil {
+		var invalidDecoderError *form.InvalidDecoderError
+
+		if errors.As(err, &invalidDecoderError) {
+			panic(err)
+		}
+
+		return err
+	}
+	return nil
+}
+
+// 判断授权状态，传入模版数据
+func (app *application) isAuthenticated(r *http.Request) bool {
+	// 判断请求体中是否有 isAuthenticatedContextKey=true
+	isAuthenticated, ok := r.Context().Value(isAuthenticatedContextKey).(bool)
+	if !ok {
+		return false
+	}
+	return isAuthenticated
+}
